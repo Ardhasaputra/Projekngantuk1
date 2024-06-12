@@ -12,13 +12,38 @@ import os
 import firebase_admin
 from firebase_admin import credentials, db
 
-# Initialize Firebase
+# Inisialisasi Firebase
 cred = credentials.Certificate("credentials.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://project-ngantuk-default-rtdb.asia-southeast1.firebasedatabase.app/'
 })
 
+# Inisialisasi variabel global
+alarm_status = False
+alarm_status2 = False
+saying = False
+COUNTER = 0
+yawn_start_time = None
+eye_close_start_time = None  # Tambahkan variabel ini untuk melacak waktu mulai mata tertutup
 
+# Load detector dan predictor
+detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat/shape_predictor_68_face_landmarks.dat')
+
+# Parse arguments
+ap = argparse.ArgumentParser()
+ap.add_argument("-w", "--webcam", type=int, default=0, help="index webcam pada sistem")
+args = vars(ap.parse_args())
+
+EYE_AR_THRESH = 0.3
+EYE_AR_CONSEC_FRAMES = 30
+YAWN_THRESH = 20
+
+# Mulai video stream
+vs = VideoStream(src=args["webcam"]).start()
+time.sleep(2.0)
+
+# Definisi fungsi
 def send_to_firebase(status, value):
     ref = db.reference('drowsiness')
     ref.push({
@@ -27,11 +52,8 @@ def send_to_firebase(status, value):
         'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
     })
 
-
 def alarm(msg):
-    global alarm_status
-    global alarm_status2
-    global saying
+    global alarm_status, alarm_status2, saying
 
     while alarm_status:
         print('call')
@@ -47,14 +69,12 @@ def alarm(msg):
         os.system(s)
         saying = False
 
-
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
     C = dist.euclidean(eye[0], eye[3])
     ear = (A + B) / (2.0 * C)
     return ear
-
 
 def final_ear(shape):
     (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
@@ -66,7 +86,6 @@ def final_ear(shape):
     ear = (leftEAR + rightEAR) / 2.0
     return (ear, leftEye, rightEye)
 
-
 def lip_distance(shape):
     top_lip = shape[50:53]
     top_lip = np.concatenate((top_lip, shape[61:64]))
@@ -77,27 +96,7 @@ def lip_distance(shape):
     distance = abs(top_mean[1] - low_mean[1])
     return distance
 
-
-ap = argparse.ArgumentParser()
-ap.add_argument("-w", "--webcam", type=int, default=0, help="index of webcam on system")
-args = vars(ap.parse_args())
-
-EYE_AR_THRESH = 0.3
-EYE_AR_CONSEC_FRAMES = 30
-YAWN_THRESH = 20
-alarm_status = False
-alarm_status2 = False
-saying = False
-COUNTER = 0
-
-print("-> Loading the predictor and detector...")
-detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat/shape_predictor_68_face_landmarks.dat')
-
-print("-> Starting Video Stream")
-vs = VideoStream(src=args["webcam"]).start()
-time.sleep(2.0)
-
+# Main loop
 while True:
     frame = vs.read()
     frame = imutils.resize(frame, width=450)
@@ -125,27 +124,33 @@ while True:
         cv2.drawContours(frame, [lip], -1, (0, 255, 0), 1)
 
         if ear < EYE_AR_THRESH:
-            COUNTER += 1
-            if COUNTER >= EYE_AR_CONSEC_FRAMES:
-                if alarm_status == False:
-                    alarm_status = True
-                    t = Thread(target=alarm, args=('wake up sir',))
-                    t.deamon = True
-                    t.start()
-                    send_to_firebase("Mata Mengantuk !!!", ear)
-                cv2.putText(frame, "MATA MENGANTUK!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if eye_close_start_time is None:
+                eye_close_start_time = time.time()
+            elif time.time() - eye_close_start_time > 4:
+                COUNTER += 1
+                if COUNTER >= EYE_AR_CONSEC_FRAMES:
+                    if not alarm_status:
+                        alarm_status = True
+                        t = Thread(target=alarm, args=('wake up sir',))
+                        t.deamon = True
+                        t.start()
+                        send_to_firebase("Mata Mengantuk !!!", ear)
+                    cv2.putText(frame, "MATA MENGANTUK!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
             COUNTER = 0
             alarm_status = False
+            eye_close_start_time = None
 
         if distance > YAWN_THRESH:
-            cv2.putText(frame, "MULUT MENGUAP !!!"
-                               "!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            if alarm_status2 == False and saying == False:
-                alarm_status2 = True
-                t = Thread(target=alarm, args=('take some fresh air sir',))
-                t.deamon = True
-                t.start()
+            if yawn_start_time is None:  # Jika mulut menguap, tetapi waktu mulai belum diatur
+                yawn_start_time = time.time()  # Setel waktu mulai
+            elif time.time() - yawn_start_time > 7:  # Hanya deteksi setelah mulut menguap selama 7 detik
+                cv2.putText(frame, "MULUT MENGUAP !!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if not alarm_status2 and not saying:
+                    alarm_status2 = True
+                    t = Thread(target=alarm, args=('take some fresh air sir',))
+                    t.deamon = True
+                    t.start()
                 send_to_firebase("Mulut Menguap !!!", distance)
         else:
             alarm_status2 = False
