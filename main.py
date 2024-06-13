@@ -12,25 +12,25 @@ import os
 import firebase_admin
 from firebase_admin import credentials, db
 
-# Inisialisasi Firebase
+
 cred = credentials.Certificate("credentials.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://project-ngantuk-default-rtdb.asia-southeast1.firebasedatabase.app/'
 })
 
-# Inisialisasi variabel global
+
 alarm_status = False
 alarm_status2 = False
 saying = False
 COUNTER = 0
 yawn_start_time = None
-eye_close_start_time = None  # Tambahkan variabel ini untuk melacak waktu mulai mata tertutup
+eye_close_start_time = None
 
-# Load detector dan predictor
+
 detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat/shape_predictor_68_face_landmarks.dat')
 
-# Parse arguments
+
 ap = argparse.ArgumentParser()
 ap.add_argument("-w", "--webcam", type=int, default=0, help="index webcam pada sistem")
 args = vars(ap.parse_args())
@@ -39,11 +39,11 @@ EYE_AR_THRESH = 0.3
 EYE_AR_CONSEC_FRAMES = 30
 YAWN_THRESH = 20
 
-# Mulai video stream
+
 vs = VideoStream(src=args["webcam"]).start()
 time.sleep(2.0)
 
-# Definisi fungsi
+
 def send_to_firebase(status, value):
     ref = db.reference('drowsiness')
     ref.push({
@@ -96,7 +96,7 @@ def lip_distance(shape):
     distance = abs(top_mean[1] - low_mean[1])
     return distance
 
-# Main loop
+
 while True:
     frame = vs.read()
     frame = imutils.resize(frame, width=450)
@@ -126,7 +126,7 @@ while True:
         if ear < EYE_AR_THRESH:
             if eye_close_start_time is None:
                 eye_close_start_time = time.time()
-            elif time.time() - eye_close_start_time > 4:
+            elif time.time() - eye_close_start_time > 2:
                 COUNTER += 1
                 if COUNTER >= EYE_AR_CONSEC_FRAMES:
                     if not alarm_status:
@@ -144,7 +144,7 @@ while True:
         if distance > YAWN_THRESH:
             if yawn_start_time is None:  # Jika mulut menguap, tetapi waktu mulai belum diatur
                 yawn_start_time = time.time()  # Setel waktu mulai
-            elif time.time() - yawn_start_time > 7:  # Hanya deteksi setelah mulut menguap selama 7 detik
+            elif time.time() - yawn_start_time > 3:  # Hanya deteksi setelah mulut menguap selama 7 detik
                 cv2.putText(frame, "MULUT MENGUAP !!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if not alarm_status2 and not saying:
                     alarm_status2 = True
@@ -152,6 +152,7 @@ while True:
                     t.deamon = True
                     t.start()
                 send_to_firebase("Mulut Menguap !!!", distance)
+
         else:
             alarm_status2 = False
 
