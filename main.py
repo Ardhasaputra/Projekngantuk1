@@ -11,14 +11,22 @@ import cv2
 import os
 import firebase_admin
 from firebase_admin import credentials, db
+import RPi.GPIO as GPIO
+from time import sleep
 
-
+# Initialize Firebase
 cred = credentials.Certificate("credentials.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://project-ngantuk-default-rtdb.asia-southeast1.firebasedatabase.app/'
 })
 
+# Buzzer setup
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+buzzer = 18
+GPIO.setup(buzzer, GPIO.OUT)
 
+# Alarm and status flags
 alarm_status = False
 alarm_status2 = False
 saying = False
@@ -26,23 +34,23 @@ COUNTER = 0
 yawn_start_time = None
 eye_close_start_time = None
 
+# Load face detector and predictor
+detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
 
-detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat/shape_predictor_68_face_landmarks.dat')
-
-
+# Argument parser for webcam index
 ap = argparse.ArgumentParser()
 ap.add_argument("-w", "--webcam", type=int, default=0, help="index webcam pada sistem")
 args = vars(ap.parse_args())
 
+# Constants
 EYE_AR_THRESH = 0.3
 EYE_AR_CONSEC_FRAMES = 30
 YAWN_THRESH = 20
 
-
+# Start video stream
 vs = VideoStream(src=args["webcam"]).start()
 time.sleep(2.0)
-
 
 def send_to_firebase(status, value):
     ref = db.reference('drowsiness')
@@ -96,6 +104,13 @@ def lip_distance(shape):
     distance = abs(top_mean[1] - low_mean[1])
     return distance
 
+def buzzer_control(state):
+    if state:
+        GPIO.output(buzzer, GPIO.HIGH)
+        print("Beep")
+    else:
+        GPIO.output(buzzer, GPIO.LOW)
+        print("No Beep")
 
 while True:
     frame = vs.read()
@@ -126,35 +141,38 @@ while True:
         if ear < EYE_AR_THRESH:
             if eye_close_start_time is None:
                 eye_close_start_time = time.time()
-            elif time.time() - eye_close_start_time > 2:
+            elif time.time() - eye_close_start_time > 1:
                 COUNTER += 1
                 if COUNTER >= EYE_AR_CONSEC_FRAMES:
                     if not alarm_status:
                         alarm_status = True
                         t = Thread(target=alarm, args=('wake up sir',))
-                        t.deamon = True
+                        t.daemon = True
                         t.start()
                         send_to_firebase("Mata Mengantuk !!!", ear)
                     cv2.putText(frame, "MATA MENGANTUK!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    buzzer_control(True)
         else:
             COUNTER = 0
             alarm_status = False
             eye_close_start_time = None
+            buzzer_control(False)
 
         if distance > YAWN_THRESH:
-            if yawn_start_time is None:  # Jika mulut menguap, tetapi waktu mulai belum diatur
-                yawn_start_time = time.time()  # Setel waktu mulai
-            elif time.time() - yawn_start_time > 3:  # Hanya deteksi setelah mulut menguap selama 7 detik
+            if yawn_start_time is None:
+                yawn_start_time = time.time()
+            elif time.time() - yawn_start_time > 3:
                 cv2.putText(frame, "MULUT MENGUAP !!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if not alarm_status2 and not saying:
                     alarm_status2 = True
                     t = Thread(target=alarm, args=('take some fresh air sir',))
-                    t.deamon = True
+                    t.daemon = True
                     t.start()
                 send_to_firebase("Mulut Menguap !!!", distance)
-
+                buzzer_control(True)
         else:
             alarm_status2 = False
+            buzzer_control(False)
 
         cv2.putText(frame, "MATA: {:.2f}".format(ear), (300, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(frame, "MULUT: {:.2f}".format(distance), (300, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -166,3 +184,4 @@ while True:
 
 cv2.destroyAllWindows()
 vs.stop()
+GPIO.cleanup()
