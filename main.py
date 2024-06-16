@@ -1,3 +1,5 @@
+import datetime
+import tempfile
 from scipy.spatial import distance as dist
 from imutils.video import VideoStream
 from imutils import face_utils
@@ -10,54 +12,62 @@ import dlib
 import cv2
 import os
 import firebase_admin
-from firebase_admin import credentials, db
-import RPi.GPIO as GPIO
-from time import sleep
+from firebase_admin import credentials, db, storage
 
-# Initialize Firebase
 cred = credentials.Certificate("credentials.json")
 firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://project-ngantuk-default-rtdb.asia-southeast1.firebasedatabase.app/'
+    'databaseURL': 'https://project-ngantuk-default-rtdb.asia-southeast1.firebasedatabase.app/',
+    'storageBucket': 'project-ngantuk.appspot.com'
 })
 
-# Buzzer setup
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BCM)
-buzzer = 18
-GPIO.setup(buzzer, GPIO.OUT)
-
-# Alarm and status flags
 alarm_status = False
 alarm_status2 = False
 saying = False
 COUNTER = 0
 yawn_start_time = None
-eye_close_start_time = None
+eye_close_start_time = None  # Tambahkan variabel ini untuk melacak waktu mulai mata tertutup
+last_uptime = 0
 
-# Load face detector and predictor
-detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
+# Load detector dan predictor
+detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat/shape_predictor_68_face_landmarks.dat')
 
-# Argument parser for webcam index
+# Parse arguments
 ap = argparse.ArgumentParser()
 ap.add_argument("-w", "--webcam", type=int, default=0, help="index webcam pada sistem")
 args = vars(ap.parse_args())
 
-# Constants
 EYE_AR_THRESH = 0.3
 EYE_AR_CONSEC_FRAMES = 30
 YAWN_THRESH = 20
 
-# Start video stream
+# Mulai video stream
 vs = VideoStream(src=args["webcam"]).start()
 time.sleep(2.0)
 
-def send_to_firebase(status, value):
+# Definisi fungsi
+def send_to_firebase(status, value, frame):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    _, img_encoded = cv2.imencode('.jpg', frame)
+    img_bytes = img_encoded.tobytes()
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+        temp_file.write(img_bytes)
+        temp_file_name = temp_file.name
+    bucket = storage.bucket()
+    blob = bucket.blob(f"images/{timestamp}.jpg")
+    blob.upload_from_filename(temp_file_name)
+    os.remove(temp_file_name)
+
+    # Make the image publicly accessible
+    blob.make_public()
+
     ref = db.reference('drowsiness')
     ref.push({
         'status': status,
         'value': value,
-        'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
+        'timestamp': timestamp,
+        'img': blob.public_url
     })
 
 def alarm(msg):
@@ -104,14 +114,7 @@ def lip_distance(shape):
     distance = abs(top_mean[1] - low_mean[1])
     return distance
 
-def buzzer_control(state):
-    if state:
-        GPIO.output(buzzer, GPIO.HIGH)
-        print("Beep")
-    else:
-        GPIO.output(buzzer, GPIO.LOW)
-        print("No Beep")
-
+# Main loop
 while True:
     frame = vs.read()
     frame = imutils.resize(frame, width=450)
@@ -141,41 +144,43 @@ while True:
         if ear < EYE_AR_THRESH:
             if eye_close_start_time is None:
                 eye_close_start_time = time.time()
-            elif time.time() - eye_close_start_time > 1:
+            elif time.time() - eye_close_start_time > 4:
                 COUNTER += 1
                 if COUNTER >= EYE_AR_CONSEC_FRAMES:
+                    cv2.putText(frame, "MATA MENGANTUK!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     if not alarm_status:
                         alarm_status = True
                         t = Thread(target=alarm, args=('wake up sir',))
-                        t.daemon = True
+                        t.deamon = True
                         t.start()
-                        send_to_firebase("Mata Mengantuk !!!", ear)
-                    cv2.putText(frame, "MATA MENGANTUK!!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    buzzer_control(True)
+                        send_to_firebase("Mata Mengantuk !!!", ear, frame)
         else:
             COUNTER = 0
             alarm_status = False
             eye_close_start_time = None
-            buzzer_control(False)
 
         if distance > YAWN_THRESH:
-            if yawn_start_time is None:
-                yawn_start_time = time.time()
-            elif time.time() - yawn_start_time > 3:
+            if yawn_start_time is None:  # Jika mulut menguap, tetapi waktu mulai belum diatur
+                yawn_start_time = time.time()  # Setel waktu mulai
+            elif time.time() - yawn_start_time > 2:  # Hanya deteksi setelah mulut menguap selama 7 detik
                 cv2.putText(frame, "MULUT MENGUAP !!!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if not alarm_status2 and not saying:
                     alarm_status2 = True
                     t = Thread(target=alarm, args=('take some fresh air sir',))
-                    t.daemon = True
+                    t.deamon = True
                     t.start()
-                send_to_firebase("Mulut Menguap !!!", distance)
-                buzzer_control(True)
+                    send_to_firebase("Mulut Menguap !!!", distance, frame)
         else:
             alarm_status2 = False
-            buzzer_control(False)
+            yawn_start_time = None
 
         cv2.putText(frame, "MATA: {:.2f}".format(ear), (300, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(frame, "MULUT: {:.2f}".format(distance), (300, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    now = time.time()
+    if (now - last_uptime) > 10:
+        db.reference('last_uptime').set(time.strftime("%Y-%m-%d %H:%M:%S"))
+        last_uptime = now
 
     cv2.imshow("Frame", frame)
     key = cv2.waitKey(1)
@@ -184,4 +189,3 @@ while True:
 
 cv2.destroyAllWindows()
 vs.stop()
-GPIO.cleanup()
